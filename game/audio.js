@@ -121,6 +121,24 @@ export class AudioEngine {
     });
   }
 
+  bossRoar() {
+    this.tone({ freq: 90, freqEnd: 46, type: 'sawtooth', dur: 0.9, gain: 0.3 });
+    this.tone({ freq: 135, freqEnd: 60, type: 'square', dur: 0.7, gain: 0.1, delay: 0.1 });
+    this.noise({ dur: 0.6, gain: 0.18, freq: 220, quality: 0.5, delay: 0.1 });
+  }
+
+  bossDown() {
+    this.explosion();
+    [392, 523, 659, 784].forEach((freq, i) => {
+      this.tone({ freq, type: 'triangle', dur: 0.2, gain: 0.16, delay: 0.25 + i * 0.09 });
+    });
+  }
+
+  shieldBlock() {
+    this.tone({ freq: 1900, freqEnd: 1200, type: 'triangle', dur: 0.14, gain: 0.18 });
+    this.tone({ freq: 950, freqEnd: 700, type: 'sine', dur: 0.12, gain: 0.12, delay: 0.03 });
+  }
+
   startPad() {
     if (this.padStarted || !this.ctx) return;
     this.padStarted = true;

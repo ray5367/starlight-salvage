@@ -7,6 +7,9 @@
 // for /output, and both runs must write the same bytes. The output shares the
 // platform's own cap (1,000 entries, 64 MiB) between game/, screenshots/ and
 // dossier.json, so the caps below leave the other two room.
+// v3 (2026-11-18): the game grew a 3-sector campaign with two bosses and
+// thirteen ship systems; this file's contract is unchanged — same copy,
+// same dossier, same determinism.
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

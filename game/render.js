@@ -10,18 +10,19 @@ import {
   STATION_Y,
   RING_RADIUS,
   DOCK_RADIUS,
-  VOLATILE_HOLD_LIMIT,
-  COMBO_WINDOW,
   COMBO_CAP,
   DEBRIS_TYPES,
   DIFFICULTIES,
   MAX_WAVES,
 } from './world.js';
+import { SECTORS } from './biomes.js';
+import { UPGRADE_POOL, ownedUpgradeCounts } from './upgrades.js';
+import { bossHealthFrac } from './bosses.js';
 import { makeRng } from './rng.js';
 
 const FONT = "'Trebuchet MS', 'Segoe UI', system-ui, sans-serif";
 
-export const TITLE_START_BUTTON = { x: 490, y: 512, w: 300, h: 62 };
+export const TITLE_START_BUTTON = { x: 490, y: 524, w: 300, h: 62 };
 export const END_BUTTON = { x: 490, y: 552, w: 300, h: 60 };
 export const PAUSE_RESUME_BUTTON = { x: 490, y: 414, w: 300, h: 54 };
 export const PAUSE_RESTART_BUTTON = { x: 490, y: 480, w: 300, h: 54 };
@@ -31,7 +32,7 @@ export function difficultyButtonRects() {
   const gap = 30;
   const total = width * 3 + gap * 2;
   const startX = (GAME_WIDTH - total) / 2;
-  return [0, 1, 2].map((i) => ({ x: startX + i * (width + gap), y: 424, w: width, h: 64 }));
+  return [0, 1, 2].map((i) => ({ x: startX + i * (width + gap), y: 448, w: width, h: 64 }));
 }
 
 export function upgradeCardRects() {
@@ -61,7 +62,7 @@ function inside(point, rect) {
   return point.x >= rect.x && point.x <= rect.x + rect.w && point.y >= rect.y && point.y <= rect.y + rect.h;
 }
 
-export function createBackdrop(seed) {
+export function createBackdrop(seed, sector = SECTORS[0]) {
   const rng = makeRng((seed ^ 0x9e3779b9) >>> 0);
   const layers = [
     { factor: 0.08, stars: [] },
@@ -77,7 +78,7 @@ export function createBackdrop(seed) {
         radius: rng.range(0.6, 1.1 + index * 0.7),
         phase: rng.range(0, Math.PI * 2),
         speed: rng.range(0.6, 2.2),
-        warm: rng.chance(0.25),
+        warm: rng.chance(sector.starWarm),
       });
     }
   });
@@ -85,28 +86,21 @@ export function createBackdrop(seed) {
   nebula.width = GAME_WIDTH;
   nebula.height = GAME_HEIGHT;
   const nctx = nebula.getContext('2d');
-  const blobs = [
-    { x: 260, y: 180, r: 340, color: 'rgba(76, 29, 149, 0.55)' },
-    { x: 1020, y: 140, r: 300, color: 'rgba(8, 145, 178, 0.4)' },
-    { x: 1080, y: 580, r: 360, color: 'rgba(162, 28, 175, 0.38)' },
-    { x: 220, y: 600, r: 300, color: 'rgba(14, 116, 144, 0.42)' },
-    { x: 660, y: 360, r: 420, color: 'rgba(30, 27, 75, 0.6)' },
-  ];
-  for (const blob of blobs) {
+  for (const blob of sector.blobs) {
     const gradient = nctx.createRadialGradient(blob.x, blob.y, 0, blob.x, blob.y, blob.r);
     gradient.addColorStop(0, blob.color);
     gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
     nctx.fillStyle = gradient;
     nctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
   }
-  return { layers, nebula };
+  return { layers, nebula, sky: sector.sky };
 }
 
 function drawBackdrop(ctx, world, backdrop, time) {
   const gradient = ctx.createLinearGradient(0, 0, 0, GAME_HEIGHT);
-  gradient.addColorStop(0, '#0a0a24');
-  gradient.addColorStop(0.55, '#0d0b33');
-  gradient.addColorStop(1, '#070718');
+  gradient.addColorStop(0, backdrop.sky[0]);
+  gradient.addColorStop(0.55, backdrop.sky[1]);
+  gradient.addColorStop(1, backdrop.sky[2]);
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
   ctx.drawImage(backdrop.nebula, 0, 0);
@@ -293,6 +287,149 @@ function drawFuelCells(ctx, cells, time) {
   }
 }
 
+function drawBosses(ctx, bosses, time) {
+  for (const boss of bosses) {
+    const def = boss.def;
+    const enraged = boss.phase === 2;
+    ctx.save();
+    ctx.translate(boss.x, boss.y);
+    const glow = ctx.createRadialGradient(0, 0, boss.radius * 0.4, 0, 0, boss.radius * 2.1);
+    glow.addColorStop(0, enraged ? 'rgba(248, 113, 113, 0.28)' : `${def.color}44`);
+    glow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, boss.radius * 2.1, 0, Math.PI * 2);
+    ctx.fill();
+    if (boss.chargeState === 'telegraph') {
+      const blink = Math.sin(time * 18) > 0;
+      ctx.save();
+      ctx.rotate(boss.chargeAngle);
+      ctx.fillStyle = blink ? 'rgba(248, 113, 113, 0.2)' : 'rgba(248, 113, 113, 0.08)';
+      ctx.beginPath();
+      ctx.moveTo(0, -18);
+      ctx.lineTo(420, -46);
+      ctx.lineTo(420, 46);
+      ctx.lineTo(0, 18);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+    ctx.rotate(boss.angle);
+    ctx.fillStyle = def.plateColor;
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 3;
+    for (let i = 0; i < 6; i += 1) {
+      ctx.save();
+      ctx.rotate((i / 6) * Math.PI * 2);
+      ctx.beginPath();
+      ctx.moveTo(boss.radius * 0.52, -13);
+      ctx.lineTo(boss.radius + 6, -9);
+      ctx.lineTo(boss.radius + 6, 9);
+      ctx.lineTo(boss.radius * 0.52, 13);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.fillStyle = '#111827';
+    ctx.beginPath();
+    ctx.arc(0, 0, boss.radius * 0.62, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    const pulse = 0.7 + 0.3 * Math.sin(time * (enraged ? 8 : 4) + boss.wobble);
+    ctx.fillStyle = def.coreColor;
+    ctx.globalAlpha = pulse;
+    ctx.beginPath();
+    ctx.arc(0, 0, boss.radius * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(0, 0, boss.radius * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = font(700, 15);
+    ctx.fillStyle = enraged ? '#f87171' : def.coreColor;
+    ctx.fillText(enraged ? `${boss.name} — ENRAGED` : boss.name, boss.x, boss.y - boss.radius - 16);
+    ctx.restore();
+  }
+}
+
+function drawBossBar(ctx, bosses) {
+  const boss = bosses[0];
+  if (!boss) return;
+  const width = 360;
+  const x = GAME_WIDTH / 2 - width / 2;
+  const y = 70;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = font(700, 13);
+  ctx.fillStyle = boss.def.coreColor;
+  ctx.fillText(`${boss.name}  ·  ${boss.hp} / ${boss.maxHp} HULL`, GAME_WIDTH / 2, y - 6);
+  drawBar(ctx, x, y, width, 10, bossHealthFrac(boss), boss.def.color, 'rgba(148, 163, 184, 0.25)');
+  ctx.restore();
+}
+
+function drawShockwaves(ctx, shockwaves) {
+  for (const ring of shockwaves) {
+    const alpha = Math.max(0, 1 - ring.radius / ring.maxRadius);
+    ctx.save();
+    ctx.strokeStyle = ring.color;
+    ctx.globalAlpha = alpha * 0.8;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(ring.x, ring.y, ring.radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = alpha * 0.35;
+    ctx.lineWidth = 10;
+    ctx.beginPath();
+    ctx.arc(ring.x, ring.y, ring.radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawDrone(ctx, drone, time) {
+  if (!drone) return;
+  ctx.save();
+  ctx.translate(drone.x, drone.y);
+  ctx.rotate(drone.angle);
+  ctx.fillStyle = 'rgba(103, 232, 249, 0.2)';
+  ctx.beginPath();
+  ctx.arc(0, 0, 20, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#155e75';
+  ctx.strokeStyle = '#67e8f9';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.moveTo(13, 0);
+  ctx.lineTo(-8, 7);
+  ctx.lineTo(-4, 0);
+  ctx.lineTo(-8, -7);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  const blink = 0.5 + 0.5 * Math.sin(time * 6);
+  ctx.fillStyle = `rgba(165, 243, 252, ${0.5 + 0.5 * blink})`;
+  ctx.beginPath();
+  ctx.arc(2, 0, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  if (drone.carrying) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(103, 232, 249, 0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 5]);
+    ctx.beginPath();
+    ctx.moveTo(drone.x, drone.y);
+    ctx.lineTo(drone.carrying.x, drone.carrying.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function drawShip(ctx, ship, time) {
   ctx.save();
   ctx.translate(ship.x, ship.y);
@@ -330,6 +467,22 @@ function drawShip(ctx, ship, time) {
   ctx.arc(5, 0, 4.5, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+  if (ship.shield > 0) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(103, 232, 249, 0.85)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i += 1) {
+      const angle = (i / 6) * Math.PI * 2 + time * 0.8;
+      const px = ship.x + Math.cos(angle) * (ship.radius + 9);
+      const py = ship.y + Math.sin(angle) * (ship.radius + 9);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+  }
   if (ship.invuln > 0 && Math.sin(time * 30) > -0.2) {
     ctx.strokeStyle = 'rgba(165, 243, 252, 0.6)';
     ctx.lineWidth = 1.5;
@@ -364,7 +517,7 @@ function drawTether(ctx, world, time) {
   ctx.arc(target.x, target.y, 3, 0, Math.PI * 2);
   ctx.fill();
   if (target.type === 'volatile') {
-    const frac = Math.min(1, world.tether.heldTime / VOLATILE_HOLD_LIMIT);
+    const frac = Math.min(1, world.tether.heldTime / world.ship.volatileHold);
     ctx.strokeStyle = frac > 0.66 ? '#f87171' : '#fbbf24';
     ctx.lineWidth = 3;
     ctx.beginPath();
@@ -448,7 +601,7 @@ function drawHud(ctx, world, ui) {
   ctx.fillText(`SCORE ${world.score.toLocaleString('en-US')}`, 24, 38);
   ctx.font = font(600, 16);
   ctx.fillStyle = '#7dd3fc';
-  ctx.fillText(`WAVE ${world.wave} / ${MAX_WAVES}  ·  ${world.difficulty.name}`, 24, 62);
+  ctx.fillText(`WAVE ${world.wave} / ${MAX_WAVES}  ·  ${world.sector.name}  ·  ${world.difficulty.name}`, 24, 62);
   if (ui.bestScore > 0) {
     ctx.font = font(400, 13);
     ctx.fillStyle = 'rgba(224, 242, 254, 0.6)';
@@ -459,13 +612,14 @@ function drawHud(ctx, world, ui) {
     ctx.font = font(700, 20);
     ctx.fillStyle = '#fbbf24';
     ctx.fillText(`COMBO x${multiplier}`, 24, 110);
-    drawBar(ctx, 24, 116, 110, 7, world.comboTimer / COMBO_WINDOW, '#fbbf24', 'rgba(148, 163, 184, 0.25)');
+    drawBar(ctx, 24, 116, 110, 7, world.comboTimer / ship.comboWindow, '#fbbf24', 'rgba(148, 163, 184, 0.25)');
   }
   ctx.textAlign = 'center';
   ctx.font = font(600, 14);
   ctx.fillStyle = '#e0f2fe';
   ctx.fillText(`MASS BANKED  ${world.bankedMass} / ${world.quota}`, GAME_WIDTH / 2, 26);
   drawBar(ctx, GAME_WIDTH / 2 - 150, 34, 300, 12, world.bankedMass / world.quota, '#22d3ee', 'rgba(148, 163, 184, 0.25)');
+  drawBossBar(ctx, world.bosses);
   ctx.textAlign = 'right';
   ctx.font = font(600, 16);
   ctx.fillStyle = '#e0f2fe';
@@ -480,6 +634,11 @@ function drawHud(ctx, world, ui) {
   ctx.fillStyle = '#e0f2fe';
   ctx.fillText(`HULL ${Math.ceil(ship.hull)}`, 24, GAME_HEIGHT - 56);
   drawBar(ctx, 24, GAME_HEIGHT - 50, 240, 13, hullFrac, hullColor, 'rgba(148, 163, 184, 0.25)');
+  if (ship.maxShield > 0) {
+    ctx.fillStyle = '#67e8f9';
+    ctx.font = font(700, 13);
+    ctx.fillText(`SHIELD ${'◆'.repeat(ship.shield)}${'◇'.repeat(Math.max(0, ship.maxShield - ship.shield))}`, 280, GAME_HEIGHT - 56);
+  }
   ctx.fillText(`FUEL ${Math.ceil(ship.fuel)}`, 24, GAME_HEIGHT - 26);
   drawBar(ctx, 24, GAME_HEIGHT - 20, 240, 13, ship.fuel / ship.maxFuel, '#fbbf24', 'rgba(148, 163, 184, 0.25)');
   if (ship.docking) {
@@ -489,7 +648,7 @@ function drawHud(ctx, world, ui) {
   } else if (ship.fuel <= 0) {
     ctx.fillStyle = '#f87171';
     ctx.font = font(700, 13);
-    ctx.fillText('OUT OF FUEL: DRIFT TO THE STATION RING TO REFUEL', 280, GAME_HEIGHT - 26);
+    ctx.fillText('OUT OF FUEL: EMERGENCY THRUST 25% — DOCK AT THE RING TO REFUEL', 280, GAME_HEIGHT - 26);
   }
   ctx.textAlign = 'right';
   ctx.font = font(400, 13);
@@ -500,14 +659,14 @@ function drawHud(ctx, world, ui) {
   if (target) {
     ctx.textAlign = 'center';
     if (target.type === 'volatile') {
-      const left = Math.max(0, VOLATILE_HOLD_LIMIT - world.tether.heldTime);
+      const left = Math.max(0, ship.volatileHold - world.tether.heldTime);
       ctx.font = font(700, 17);
       ctx.fillStyle = left < 1 ? '#f87171' : '#fbbf24';
-      ctx.fillText(`VOLATILE TETHERED: ${left.toFixed(1)}s TO DETONATION`, GAME_WIDTH / 2, 78);
+      ctx.fillText(`VOLATILE TETHERED: ${left.toFixed(1)}s TO DETONATION`, GAME_WIDTH / 2, 98);
     } else {
       ctx.font = font(600, 15);
       ctx.fillStyle = '#a5f3fc';
-      ctx.fillText(`TETHERED: ${DEBRIS_TYPES[target.type].label} — DRAG IT INTO THE RING`, GAME_WIDTH / 2, 78);
+      ctx.fillText(`TETHERED: ${DEBRIS_TYPES[target.type].label} — DRAG IT INTO THE RING`, GAME_WIDTH / 2, 98);
     }
   }
   if (world.flare.phase === 'warn') {
@@ -515,12 +674,12 @@ function drawHud(ctx, world, ui) {
     ctx.textAlign = 'center';
     ctx.font = font(700, 20);
     ctx.fillStyle = `rgba(251, 191, 36, ${blink})`;
-    ctx.fillText('!! SOLAR FLARE INCOMING !!', GAME_WIDTH / 2, 112);
+    ctx.fillText('!! SOLAR FLARE INCOMING !!', GAME_WIDTH / 2, 132);
   } else if (world.flare.phase === 'active') {
     ctx.textAlign = 'center';
     ctx.font = font(700, 20);
     ctx.fillStyle = '#fbbf24';
-    ctx.fillText('SOLAR FLARE — DEBRIS SURGE', GAME_WIDTH / 2, 112);
+    ctx.fillText('SOLAR FLARE — DEBRIS SURGE', GAME_WIDTH / 2, 132);
   }
   ctx.restore();
 }
@@ -538,11 +697,13 @@ function drawBanner(ctx, world) {
   ctx.shadowBlur = 22;
   ctx.fillStyle = '#ecfeff';
   ctx.font = font(700, 54);
-  ctx.fillText(banner.text, GAME_WIDTH / 2, 300);
+  // The banner rides the top third, never the centre: the ring, the ship
+  // and the field stay readable while the wave announces itself.
+  ctx.fillText(banner.text, GAME_WIDTH / 2, 178);
   ctx.shadowBlur = 0;
   ctx.fillStyle = '#7dd3fc';
   ctx.font = font(600, 20);
-  ctx.fillText(banner.sub, GAME_WIDTH / 2, 336);
+  ctx.fillText(banner.sub, GAME_WIDTH / 2, 214);
   ctx.restore();
 }
 
@@ -580,24 +741,46 @@ function drawTitle(ctx, world, ui) {
   if (ui.bestScore > 0) {
     ctx.fillStyle = '#fbbf24';
     ctx.font = font(700, 17);
-    ctx.fillText(`BEST SCORE  ${ui.bestScore.toLocaleString('en-US')}`, GAME_WIDTH / 2, 240);
+    ctx.fillText(`BEST SCORE  ${ui.bestScore.toLocaleString('en-US')}`, GAME_WIDTH / 2, 232);
   } else {
     ctx.fillStyle = 'rgba(224, 242, 254, 0.55)';
     ctx.font = font(400, 15);
-    ctx.fillText('No salvage banked yet — fly your first run.', GAME_WIDTH / 2, 240);
+    ctx.fillText('No salvage banked yet — fly your first run.', GAME_WIDTH / 2, 232);
   }
   const lines = [
     'Tether debris with Space or the mouse, then drag it into the recycler ring and release to bank it.',
-    'Bank the wave quota to advance — clear all 5 waves to win the field.',
-    'Volatile cores pay triple but detonate if held over 3 seconds or hit too hard.',
+    'Bank the wave quota to advance — clear all 5 waves across 3 sectors to win the field.',
+    'Volatile cores pay triple but detonate if held too long. Slam debris into bosses to break them.',
     'Mines and solar flares will ruin your hull. Dock at the station ring to refuel.',
   ];
   ctx.font = font(400, 17);
   ctx.fillStyle = 'rgba(224, 242, 254, 0.92)';
-  lines.forEach((line, i) => ctx.fillText(line, GAME_WIDTH / 2, 268 + i * 30));
+  lines.forEach((line, i) => ctx.fillText(line, GAME_WIDTH / 2, 262 + i * 25));
+  ctx.font = font(700, 14);
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillText('THE CAMPAIGN  ·  3 SECTORS  ·  2 BOSSES  ·  13 SHIP SYSTEMS', GAME_WIDTH / 2, 378);
+  const chipWidth = 293;
+  const chipGap = 15;
+  const chipTotal = chipWidth * 3 + chipGap * 2;
+  const chipX = (GAME_WIDTH - chipTotal) / 2;
+  const chipColors = { azure: '#22d3ee', ember: '#f97316', void: '#a78bfa' };
+  const numerals = ['I', 'II', 'III'];
+  SECTORS.forEach((sector, i) => {
+    const rect = { x: chipX + i * (chipWidth + chipGap), y: 388, w: chipWidth, h: 32 };
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+    ctx.strokeStyle = chipColors[sector.id];
+    ctx.lineWidth = 2;
+    roundRectPath(ctx, rect.x, rect.y, rect.w, rect.h, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#e0f2fe';
+    ctx.font = font(700, 13);
+    const bossLabel = sector.boss === 'warden' ? 'BOSS: SCRAP WARDEN' : sector.boss === 'reaper' ? 'BOSS: VOID REAPER' : 'NO BOSS';
+    ctx.fillText(`${numerals[i]} · ${sector.name} · ${bossLabel}`, rect.x + rect.w / 2, rect.y + 21);
+  });
   ctx.font = font(700, 14);
   ctx.fillStyle = 'rgba(224, 242, 254, 0.7)';
-  ctx.fillText('CHOOSE YOUR FIELD  ·  1 / 2 / 3', GAME_WIDTH / 2, 410);
+  ctx.fillText('CHOOSE YOUR FIELD  ·  1 / 2 / 3', GAME_WIDTH / 2, 438);
   const difficultyRects = difficultyButtonRects();
   DIFFICULTIES.forEach((difficulty, i) => {
     const rect = difficultyRects[i];
@@ -667,6 +850,84 @@ function drawUpgradeIcon(ctx, icon, cx, cy) {
     ctx.stroke();
     ctx.fillRect(-14, 10, 5, 6);
     ctx.fillRect(9, 10, 5, 6);
+  } else if (icon === 'aegis') {
+    ctx.beginPath();
+    for (let i = 0; i < 6; i += 1) {
+      const angle = (i / 6) * Math.PI * 2 - Math.PI / 2;
+      const px = Math.cos(angle) * 17;
+      const py = Math.sin(angle) * 17;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, 6, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (icon === 'drone') {
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(-9, 8);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-9, -8);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, 0, 19, 0, Math.PI * 2);
+    ctx.setLineDash([3, 5]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  } else if (icon === 'coil') {
+    ctx.beginPath();
+    ctx.moveTo(4, -18);
+    ctx.lineTo(-8, 2);
+    ctx.lineTo(0, 2);
+    ctx.lineTo(-4, 18);
+    ctx.lineTo(9, -3);
+    ctx.lineTo(1, -3);
+    ctx.closePath();
+    ctx.stroke();
+  } else if (icon === 'clamp') {
+    ctx.beginPath();
+    ctx.moveTo(-11, -16);
+    ctx.lineTo(11, -16);
+    ctx.lineTo(-11, 16);
+    ctx.lineTo(11, 16);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-11, -16);
+    ctx.lineTo(11, 16);
+    ctx.moveTo(11, -16);
+    ctx.lineTo(-11, 16);
+    ctx.stroke();
+  } else if (icon === 'plate') {
+    for (let i = 0; i < 3; i += 1) {
+      ctx.beginPath();
+      ctx.moveTo(-14, -10 + i * 10);
+      ctx.lineTo(0, -16 + i * 10);
+      ctx.lineTo(14, -10 + i * 10);
+      ctx.stroke();
+    }
+  } else if (icon === 'scoop') {
+    ctx.beginPath();
+    ctx.moveTo(-14, -14);
+    ctx.lineTo(14, -14);
+    ctx.lineTo(4, 6);
+    ctx.lineTo(4, 16);
+    ctx.lineTo(-4, 16);
+    ctx.lineTo(-4, 6);
+    ctx.closePath();
+    ctx.stroke();
+  } else if (icon === 'relay') {
+    for (let i = 0; i < 3; i += 1) {
+      ctx.beginPath();
+      ctx.arc(-6 + i * 6, 0, 5 + i * 4, -Math.PI / 2, Math.PI / 2);
+      ctx.stroke();
+    }
+  } else if (icon === 'nano') {
+    ctx.fillRect(-3, -16, 6, 32);
+    ctx.fillRect(-16, -3, 32, 6);
   } else {
     roundRectPath(ctx, -13, -9, 23, 18, 4);
     ctx.stroke();
@@ -692,6 +953,40 @@ function wrapText(ctx, text, maxWidth) {
   }
   if (line) lines.push(line);
   return lines;
+}
+
+function drawUpgradeBay(ctx, world) {
+  const owned = ownedUpgradeCounts(world);
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = font(700, 14);
+  ctx.fillStyle = '#fbbf24';
+  ctx.fillText('UPGRADE BAY  ·  13 SHIP SYSTEMS  ·  ✓ INSTALLED THIS RUN', GAME_WIDTH / 2, 528);
+  const chipW = 120;
+  const chipH = 28;
+  const gap = 10;
+  const perRow = 7;
+  const rows = [UPGRADE_POOL.slice(0, perRow), UPGRADE_POOL.slice(perRow)];
+  rows.forEach((row, rowIndex) => {
+    const total = row.length * chipW + (row.length - 1) * gap;
+    const startX = (GAME_WIDTH - total) / 2;
+    const y = 538 + rowIndex * (chipH + 6);
+    row.forEach((upgrade, i) => {
+      const count = owned.get(upgrade.id) ?? 0;
+      const x = startX + i * (chipW + gap);
+      ctx.fillStyle = count > 0 ? 'rgba(34, 211, 238, 0.18)' : 'rgba(15, 23, 42, 0.85)';
+      ctx.strokeStyle = count > 0 ? '#67e8f9' : 'rgba(100, 116, 139, 0.6)';
+      ctx.lineWidth = count > 0 ? 2 : 1.5;
+      roundRectPath(ctx, x, y, chipW, chipH, 7);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = count > 0 ? '#ecfeff' : 'rgba(224, 242, 254, 0.55)';
+      ctx.font = font(700, 11);
+      const label = count > 1 ? `✓x${count} ${upgrade.name}` : count === 1 ? `✓ ${upgrade.name}` : upgrade.name;
+      ctx.fillText(label, x + chipW / 2, y + 18);
+    });
+  });
+  ctx.restore();
 }
 
 function drawUpgradeScreen(ctx, world, ui) {
@@ -729,8 +1024,9 @@ function drawUpgradeScreen(ctx, world, ui) {
   });
   ctx.font = font(400, 15);
   ctx.fillStyle = 'rgba(224, 242, 254, 0.65)';
-  ctx.fillText('Click a card or press 1, 2 or 3', GAME_WIDTH / 2, 556);
+  ctx.fillText('Click a card or press 1, 2 or 3', GAME_WIDTH / 2, 632);
   ctx.restore();
+  drawUpgradeBay(ctx, world);
 }
 
 function drawEndScreen(ctx, world, ui, victory) {
@@ -755,25 +1051,27 @@ function drawEndScreen(ctx, world, ui, victory) {
     ['TIME', formatTime(world.runTime)],
     ['DEBRIS BANKED', String(world.bankedCount)],
     ['BEST COMBO', world.bestCombo >= 2 ? `x${Math.min(world.bestCombo, COMBO_CAP)}` : '—'],
-    victory ? ['WAVES CLEARED', `${MAX_WAVES} / ${MAX_WAVES}`] : ['WAVE REACHED', `${world.wave} / ${MAX_WAVES}`],
+    ['BOSSES DOWN', `${world.bossesDown} / 2`],
+    ['SHIP SYSTEMS', `${world.upgradesTaken.length} INSTALLED`],
+    victory ? ['SECTORS CLEARED', '3 / 3'] : ['WAVE REACHED', `${world.wave} / ${MAX_WAVES}`],
   ];
-  ctx.font = font(400, 19);
+  ctx.font = font(400, 18);
   stats.forEach(([label, value], i) => {
-    const y = 288 + i * 34;
+    const y = 272 + i * 29;
     ctx.fillStyle = 'rgba(224, 242, 254, 0.7)';
     ctx.textAlign = 'right';
     ctx.fillText(label, GAME_WIDTH / 2 - 24, y);
     ctx.fillStyle = '#ecfeff';
-    ctx.font = font(700, 19);
+    ctx.font = font(700, 18);
     ctx.textAlign = 'left';
     ctx.fillText(value, GAME_WIDTH / 2 + 24, y);
-    ctx.font = font(400, 19);
+    ctx.font = font(400, 18);
   });
   if (ui.newBest) {
     ctx.fillStyle = '#fbbf24';
     ctx.font = font(700, 22);
     ctx.textAlign = 'center';
-    ctx.fillText('★ NEW BEST SCORE ★', GAME_WIDTH / 2, 508);
+    ctx.fillText('★ NEW BEST SCORE ★', GAME_WIDTH / 2, 522);
   }
   drawButton(ctx, END_BUTTON, victory ? 'SALVAGE AGAIN' : 'TRY AGAIN', inside(ui.mouse, END_BUTTON), victory ? '#22d3ee' : '#f87171');
   ctx.font = font(400, 15);
@@ -810,10 +1108,13 @@ export function render(ctx, world, ui) {
   drawFuelCells(ctx, world.fuelCells, ui.time);
   for (const debris of world.debris) drawDebris(ctx, debris, ui.time);
   drawMines(ctx, world.mines, ui.time);
+  drawBosses(ctx, world.bosses, ui.time);
+  drawShockwaves(ctx, world.shockwaves);
   if (ui.screen === 'playing' && !ui.paused) drawTargetHint(ctx, world, ui.input);
   if (ui.screen === 'playing') {
     drawTether(ctx, world, ui.time);
     drawShip(ctx, world.ship, ui.time);
+    drawDrone(ctx, world.drone, ui.time);
   }
   drawParticles(ctx, world.particles);
   drawFloaters(ctx, world.floaters);

@@ -9,14 +9,14 @@ import {
   STATION_Y,
   RING_RADIUS,
   DOCK_RADIUS,
-  VOLATILE_HOLD_LIMIT,
-  COMBO_WINDOW,
   COMBO_CAP,
   DEBRIS_TYPES,
   WAVE_CONFIGS,
+  makeDebris,
   addParticles,
   addFloater,
 } from './world.js';
+import { updateBosses, updateShockwaves, damageBoss, bossDebrisImpact } from './bosses.js';
 
 const SHIP_DAMPING = 0.9;
 const DEBRIS_DAMPING = 0.08;
@@ -53,6 +53,15 @@ function bounceOffWalls(body, radius) {
 function damageShip(world, amount, events) {
   const ship = world.ship;
   if (ship.invuln > 0) return false;
+  // The Aegis shield eats the whole hit and spends one charge; the hull
+  // only suffers once the shield is down.
+  if (ship.shield > 0) {
+    ship.shield -= 1;
+    ship.invuln = 0.7;
+    addParticles(world, ship.x, ship.y, { count: 18, color: '#67e8f9', speed: 160, life: 0.4, size: 2.5 });
+    events.push({ type: 'shield_block' });
+    return false;
+  }
   ship.hull -= amount;
   ship.invuln = 0.7;
   world.shake = Math.min(1, world.shake + 0.45);
@@ -75,21 +84,35 @@ function explodeDebris(world, debris, events) {
   events.push({ type: 'explode', x: debris.x, y: debris.y });
   const ship = world.ship;
   if (distance(debris.x, debris.y, ship.x, ship.y) < 160) damageShip(world, 20, events);
+  // A volatile blast beside a boss cracks its armour: the tether stays the
+  // weapon, and dragging a volatile into a boss is the fastest kill.
+  for (const boss of world.bosses.slice()) {
+    if (distance(debris.x, debris.y, boss.x, boss.y) < 170 + boss.radius) {
+      damageBoss(world, boss, 2, events);
+    }
+  }
 }
 
-function bankDebris(world, debris, events) {
+function bankDebris(world, debris, events, viaDrone = false) {
   const index = world.debris.indexOf(debris);
   if (index !== -1) world.debris.splice(index, 1);
+  const ship = world.ship;
   // Banking again before the combo window runs out raises the multiplier, up
-  // to the cap; a slow run banks at x1. Wreckdiver doubles every score.
-  world.combo = world.comboTimer > 0 ? world.combo + 1 : 1;
-  world.comboTimer = COMBO_WINDOW;
-  world.bestCombo = Math.max(world.bestCombo, world.combo);
-  const multiplier = Math.min(world.combo, COMBO_CAP);
-  const points = debris.value * multiplier * world.difficulty.scoreMult;
+  // to the cap; a slow run banks at x1. Wreckdiver doubles every score, and
+  // Overcharge coils multiply it again. Drone deliveries bank flat: the
+  // combo is the pilot's to earn.
+  let multiplier = 1;
+  if (!viaDrone) {
+    world.combo = world.comboTimer > 0 ? world.combo + 1 : 1;
+    world.comboTimer = ship.comboWindow;
+    world.bestCombo = Math.max(world.bestCombo, world.combo);
+    multiplier = Math.min(world.combo, COMBO_CAP);
+  }
+  const points = Math.round(debris.value * multiplier * ship.scoreMult * world.difficulty.scoreMult);
   world.score += points;
   world.bankedMass += debris.mass;
   world.bankedCount += 1;
+  if (ship.fuelOnBank > 0) ship.fuel = Math.min(ship.maxFuel, ship.fuel + ship.fuelOnBank);
   addParticles(world, debris.x, debris.y, { count: 22, color: DEBRIS_TYPES[debris.type].glow, speed: 170, life: 0.6, size: 2.5 });
   const label = multiplier > 1 ? `+${points} ${DEBRIS_TYPES[debris.type].label} x${multiplier}` : `+${points} ${DEBRIS_TYPES[debris.type].label}`;
   addFloater(world, STATION_X, STATION_Y - RING_RADIUS - 14, label, DEBRIS_TYPES[debris.type].color);
@@ -160,7 +183,7 @@ function updateTether(world, input, dt, events) {
     releaseTether(world, events, false);
     return;
   }
-  if (target.type === 'volatile' && tether.heldTime > VOLATILE_HOLD_LIMIT) {
+  if (target.type === 'volatile' && tether.heldTime > ship.volatileHold) {
     explodeDebris(world, target, events);
     return;
   }
@@ -178,11 +201,15 @@ function updateShip(world, input, dt) {
   if (input.isDown('KeyD') || input.isDown('ArrowRight')) thrustX += 1;
   const magnitude = Math.hypot(thrustX, thrustY);
   ship.thrusting = false;
-  if (magnitude > 0 && ship.fuel > 0) {
-    const scale = ship.thrust / magnitude;
+  // An empty tank leaves the emergency reserve: quarter-power thrust that
+  // burns nothing, so a stranded ship can always limp back to the ring.
+  const reserve = ship.fuel <= 0;
+  const power = reserve ? 0.25 : 1;
+  if (magnitude > 0) {
+    const scale = (ship.thrust * power) / magnitude;
     ship.vx += thrustX * scale * dt;
     ship.vy += thrustY * scale * dt;
-    ship.fuel = Math.max(0, ship.fuel - FUEL_BURN * dt);
+    if (!reserve) ship.fuel = Math.max(0, ship.fuel - FUEL_BURN * dt);
     ship.thrusting = true;
     if (world.rng.chance(0.6)) {
       const backX = ship.x - Math.cos(ship.angle) * 18;
@@ -202,6 +229,7 @@ function updateShip(world, input, dt) {
   ship.y += ship.vy * dt;
   bounceOffWalls(ship, ship.radius);
   ship.invuln = Math.max(0, ship.invuln - dt);
+  if (ship.regen > 0 && ship.hull > 0) ship.hull = Math.min(ship.maxHull, ship.hull + ship.regen * dt);
   const fromStation = distance(ship.x, ship.y, STATION_X, STATION_Y);
   ship.docking = fromStation < DOCK_RADIUS && speed < 80 && ship.fuel < ship.maxFuel;
   if (ship.docking) ship.fuel = Math.min(ship.maxFuel, ship.fuel + DOCK_REFUEL * dt);
@@ -284,7 +312,7 @@ function updateCollisions(world, events) {
       addParticles(world, mine.x, mine.y, { count: 30, color: '#f87171', speed: 240, life: 0.6, size: 3 });
       world.shake = Math.min(1, world.shake + 0.5);
       events.push({ type: 'mine_hit', x: mine.x, y: mine.y });
-      damageShip(world, world.difficulty.mineDamage, events);
+      damageShip(world, Math.round(world.difficulty.mineDamage * (1 - ship.mineResist)), events);
     }
   }
   for (const cell of world.fuelCells.slice()) {
@@ -296,6 +324,145 @@ function updateCollisions(world, events) {
       addFloater(world, cell.x, cell.y - 18, '+40 FUEL', '#4ade80');
       events.push({ type: 'fuel' });
     }
+  }
+  for (const boss of world.bosses.slice()) {
+    // Debris slammed into the boss at speed cracks its armour; gentle
+    // contact just bounces off.
+    for (const debris of world.debris.slice()) {
+      const dx = debris.x - boss.x;
+      const dy = debris.y - boss.y;
+      const dist = Math.hypot(dx, dy);
+      const minDist = boss.radius + debris.radius;
+      if (dist >= minDist || dist === 0) continue;
+      const nx = dx / dist;
+      const ny = dy / dist;
+      debris.x = boss.x + nx * minDist;
+      debris.y = boss.y + ny * minDist;
+      const closing = -((debris.vx - boss.vx) * nx + (debris.vy - boss.vy) * ny);
+      const reflect = 2 * ((debris.vx - boss.vx) * nx + (debris.vy - boss.vy) * ny);
+      debris.vx -= reflect * nx;
+      debris.vy -= reflect * ny;
+      if (closing > 0) bossDebrisImpact(world, boss, debris, closing, events);
+      if (!world.bosses.includes(boss)) break;
+    }
+    if (!world.bosses.includes(boss)) continue;
+    // Ramming the boss hurts the ship, never the boss.
+    const shipDist = distance(boss.x, boss.y, ship.x, ship.y);
+    if (shipDist < boss.radius + ship.radius && shipDist > 0) {
+      const nx = (ship.x - boss.x) / shipDist;
+      const ny = (ship.y - boss.y) / shipDist;
+      ship.x = boss.x + nx * (boss.radius + ship.radius);
+      ship.y = boss.y + ny * (boss.radius + ship.radius);
+      ship.vx += nx * 180;
+      ship.vy += ny * 180;
+      damageShip(world, 15, events);
+    }
+  }
+}
+
+function updateDrone(world, dt, events) {
+  const drone = world.drone;
+  if (!drone) return;
+  const ship = world.ship;
+  const SPEED = 250;
+  let targetX;
+  let targetY;
+  if (drone.carrying) {
+    // Ferry the load to the recycler ring and bank it flat.
+    targetX = STATION_X;
+    targetY = STATION_Y;
+    if (Math.hypot(drone.x - STATION_X, drone.y - STATION_Y) < RING_RADIUS) {
+      const load = drone.carrying;
+      drone.carrying = null;
+      drone.state = 'seek';
+      if (world.debris.includes(load)) bankDebris(world, load, events, true);
+      return;
+    }
+  } else {
+    let nearest = null;
+    let nearestDist = 520;
+    for (const debris of world.debris) {
+      if (debris.type !== 'scrap') continue;
+      if (world.tether.target === debris) continue;
+      const dist = Math.hypot(debris.x - drone.x, debris.y - drone.y);
+      if (dist < nearestDist) {
+        nearest = debris;
+        nearestDist = dist;
+      }
+    }
+    if (nearest) {
+      targetX = nearest.x;
+      targetY = nearest.y;
+      if (nearestDist < 24) {
+        drone.carrying = nearest;
+        drone.state = 'deliver';
+      }
+    } else {
+      // Nothing worth fetching: hold station beside the ship.
+      const orbit = world.runTime * 1.1;
+      targetX = ship.x + Math.cos(orbit) * 72;
+      targetY = ship.y + Math.sin(orbit) * 72;
+    }
+  }
+  const dx = targetX - drone.x;
+  const dy = targetY - drone.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const arrive = Math.min(1, dist / 60);
+  drone.vx += ((dx / dist) * SPEED * arrive - drone.vx) * Math.min(1, dt * 3);
+  drone.vy += ((dy / dist) * SPEED * arrive - drone.vy) * Math.min(1, dt * 3);
+  drone.x += drone.vx * dt;
+  drone.y += drone.vy * dt;
+  if (Math.hypot(drone.vx, drone.vy) > 20) drone.angle = Math.atan2(drone.vy, drone.vx);
+  if (drone.carrying) {
+    drone.carrying.x = drone.x;
+    drone.carrying.y = drone.y + 16;
+    drone.carrying.vx = 0;
+    drone.carrying.vy = 0;
+  }
+}
+
+// Sector atmosphere: embers rise through Ember Reach, cold motes drift the
+// Void Veil. Pure ambience, capped so it never floods the particle budget.
+function updateAmbient(world, dt) {
+  const ambient = world.sector ? world.sector.ambient : null;
+  if (!ambient || world.particles.length > 300) return;
+  if (!world.rng.chance(dt * 7)) return;
+  const rng = world.rng;
+  if (ambient === 'ember') {
+    world.particles.push({
+      x: rng.range(0, GAME_WIDTH),
+      y: GAME_HEIGHT + 4,
+      vx: rng.range(-8, 8),
+      vy: rng.range(-46, -26),
+      life: rng.range(1.6, 2.6),
+      maxLife: 2.6,
+      size: rng.range(1.2, 2.4),
+      color: rng.chance(0.5) ? '#fb923c' : '#fbbf24',
+    });
+  } else {
+    world.particles.push({
+      x: rng.chance(0.5) ? -4 : GAME_WIDTH + 4,
+      y: rng.range(0, GAME_HEIGHT),
+      vx: rng.range(10, 26) * (rng.chance(0.5) ? 1 : -1),
+      vy: rng.range(-8, 8),
+      life: rng.range(2, 3.4),
+      maxLife: 3.4,
+      size: rng.range(1.2, 2.2),
+      color: '#a78bfa',
+    });
+  }
+}
+
+// Volatiles can detonate and bosses can scatter the field, so a wave must
+// never run dry: while the debris left plus the mass already banked falls
+// short of the quota, fresh scrap drifts in. The wave stays winnable.
+function topUpField(world) {
+  const config = WAVE_CONFIGS[world.wave - 1];
+  const speed = config.speed * world.difficulty.speedMult * world.sector.driftMult;
+  let guard = 0;
+  while (world.debris.length + world.bankedMass < world.quota && guard < 8) {
+    world.debris.push(makeDebris(world, 'scrap', speed));
+    guard += 1;
   }
 }
 
@@ -374,8 +541,13 @@ export function stepWorld(world, input, dt) {
   updateShip(world, input, dt);
   updateTether(world, input, dt, events);
   updateDrifters(world, dt);
+  updateBosses(world, dt, events);
+  updateShockwaves(world, dt);
+  updateDrone(world, dt, events);
   updateCollisions(world, events);
+  topUpField(world);
   updateEffects(world, dt);
+  updateAmbient(world, dt);
   return events;
 }
 

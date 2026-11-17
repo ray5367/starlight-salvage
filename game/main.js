@@ -11,15 +11,17 @@ import {
   createWorld,
   startWave,
   seedAmbientField,
-  rollUpgrades,
-  applyUpgrade,
   DIFFICULTIES,
-  COMBO_WINDOW,
   STATION_X,
   STATION_Y,
   RING_RADIUS,
   MAX_WAVES,
+  addParticles,
+  addFloater,
 } from './world.js';
+import { sectorForWave } from './biomes.js';
+import { rollUpgrades, applyUpgrade, upgradeById } from './upgrades.js';
+import { bossForWave, spawnBoss, damageBoss } from './bosses.js';
 import { stepWorld, stepAmbient } from './physics.js';
 import {
   createBackdrop,
@@ -52,7 +54,7 @@ const music = new MusicSequencer(seed);
 music.attach(audio);
 
 let world = createWorld(seed);
-let backdrop = createBackdrop(seed);
+let backdrop = createBackdrop(seed, sectorForWave(1));
 let screen = 'title';
 let paused = false;
 let choices = [];
@@ -68,12 +70,25 @@ const staging = shot !== null;
 
 seedAmbientField(world);
 
+function maybeSpawnBoss() {
+  const bossId = bossForWave(world.wave);
+  if (bossId) {
+    spawnBoss(world, bossId);
+    audio.bossRoar();
+  }
+}
+
+function rebuildBackdrop() {
+  backdrop = createBackdrop(world.seed, world.sector);
+}
+
 function startRun() {
   const runSeed = (seed + runNumber * 7919) >>> 0;
   runNumber += 1;
   world = createWorld(runSeed, selectedDifficulty);
-  backdrop = createBackdrop(runSeed);
+  backdrop = createBackdrop(runSeed, sectorForWave(1));
   startWave(world, 1);
+  maybeSpawnBoss();
   screen = 'playing';
   paused = false;
   choices = [];
@@ -107,6 +122,8 @@ function pickUpgrade(index) {
   applyUpgrade(world, upgrade);
   audio.arpeggio();
   startWave(world, world.wave + 1);
+  rebuildBackdrop();
+  maybeSpawnBoss();
   screen = 'playing';
   paused = false;
   input.clearMomentary();
@@ -122,6 +139,10 @@ function handleEvents(events) {
     else if (event.type === 'fuel') audio.fuelPickup();
     else if (event.type === 'tether_attach') audio.zap();
     else if (event.type === 'flare_warn') audio.warning();
+    else if (event.type === 'boss_down') audio.bossDown();
+    else if (event.type === 'boss_telegraph' || event.type === 'boss_phase') audio.warning();
+    else if (event.type === 'boss_hit') audio.thud();
+    else if (event.type === 'shield_block') audio.shieldBlock();
     else if (event.type === 'wave_clear') waveCleared = true;
     else if (event.type === 'game_over') destroyed = true;
   }
@@ -201,28 +222,46 @@ function handleClicks() {
 }
 
 function stagePlayShot() {
-  world.score = 240;
-  world.bankedMass = 2;
-  world.runTime = 47;
+  // A mid-run boss fight in Ember Reach, built through the game's own
+  // transitions: two systems installed, wave 3 started, the Warden spawned
+  // and half-broken, then the field composed for the camera. No banner: the
+  // centre stays open so the ring, the boss and the tether all read.
+  applyUpgrade(world, upgradeById('drone'));
+  applyUpgrade(world, upgradeById('aegis'));
+  startWave(world, 3);
+  rebuildBackdrop();
+  const boss = spawnBoss(world, 'warden');
+  boss.hp = 3;
+  boss.x = 950;
+  boss.y = 185;
+  boss.vx = 0;
+  boss.vy = 0;
+  boss.chargeState = 'telegraph';
+  boss.chargeTime = 0.9;
+  boss.chargeAngle = Math.atan2(480 - boss.y, 430 - boss.x);
+  world.score = 1240;
+  world.bankedMass = 7;
+  world.runTime = 187;
   displayBestOverride = 1870;
-  world.combo = 3;
-  world.comboTimer = COMBO_WINDOW - 1.8;
-  world.bestCombo = 3;
-  world.banner = { text: 'WAVE 1', sub: 'BANK 6 MASS  ·  SALVAGER', time: 1.9, ttl: 2.6 };
+  world.combo = 4;
+  world.comboTimer = world.ship.comboWindow - 1.8;
+  world.bestCombo = 4;
+  world.banner = null;
+  world.flare = { phase: 'warn', timer: 0, time: 1.4 };
   world.ship.hull = 82;
   world.ship.fuel = 64;
   world.ship.x = 430;
   world.ship.y = 480;
   world.ship.vx = 0;
   world.ship.vy = 0;
-  const scrap = world.debris.find((debris) => debris.type === 'scrap');
-  if (scrap) {
-    scrap.x = 520;
-    scrap.y = 420;
-    scrap.vx = 0;
-    scrap.vy = 0;
-    world.tether.target = scrap;
-    world.tether.heldTime = 0.4;
+  const volatile = world.debris.find((debris) => debris.type === 'volatile');
+  if (volatile) {
+    volatile.x = 520;
+    volatile.y = 420;
+    volatile.vx = 0;
+    volatile.vy = 0;
+    world.tether.target = volatile;
+    world.tether.heldTime = 1.2;
   }
   const core = world.debris.find((debris) => debris.type === 'core');
   if (core) {
@@ -231,13 +270,54 @@ function stagePlayShot() {
     core.vx = 10;
     core.vy = 8;
   }
-  const volatile = world.debris.find((debris) => debris.type === 'volatile');
-  if (volatile) {
-    volatile.x = 950;
-    volatile.y = 520;
-    volatile.vx = -12;
-    volatile.vy = -6;
+  const secondVolatile = world.debris.find((debris) => debris.type === 'volatile' && debris !== volatile);
+  if (secondVolatile) {
+    secondVolatile.x = 1010;
+    secondVolatile.y = 520;
+    secondVolatile.vx = -12;
+    secondVolatile.vy = -6;
   }
+  const droneLoad = world.debris.find((debris) => debris.type === 'scrap');
+  if (world.drone && droneLoad) {
+    world.drone.x = 300;
+    world.drone.y = 300;
+    world.drone.vx = 60;
+    world.drone.vy = 20;
+    world.drone.carrying = droneLoad;
+    world.drone.state = 'deliver';
+    droneLoad.x = 300;
+    droneLoad.y = 316;
+    droneLoad.vx = 0;
+    droneLoad.vy = 0;
+  }
+  const mineSpots = [
+    [700, 120],
+    [150, 620],
+    [1150, 380],
+    [250, 640],
+    [1060, 620],
+  ];
+  world.mines.forEach((mine, i) => {
+    const spot = mineSpots[i % mineSpots.length];
+    mine.x = spot[0];
+    mine.y = spot[1];
+    mine.vx = 0;
+    mine.vy = 0;
+  });
+  const cellSpots = [
+    [180, 180],
+    [1120, 600],
+  ];
+  world.fuelCells.forEach((cell, i) => {
+    const spot = cellSpots[i % cellSpots.length];
+    cell.x = spot[0];
+    cell.y = spot[1];
+    cell.vx = 0;
+    cell.vy = 0;
+  });
+  addParticles(world, boss.x, boss.y, { count: 14, color: '#fbbf24', speed: 170, life: 0.6, size: 3 });
+  addParticles(world, STATION_X, STATION_Y, { count: 12, color: '#22d3ee', speed: 120, life: 0.6, size: 2.5 });
+  addFloater(world, STATION_X, STATION_Y - RING_RADIUS - 14, '+150 DATA CORE x4', '#e879f9');
 }
 
 function applyShotPreset(shotName) {
@@ -249,11 +329,24 @@ function applyShotPreset(shotName) {
     stagePlayShot();
   } else if (shotName === 'upgrade') {
     startRun();
+    applyUpgrade(world, upgradeById('hull'));
+    applyUpgrade(world, upgradeById('thrust'));
     world.bankedMass = world.quota;
     completeWave();
   } else if (shotName === 'victory') {
     startRun();
-    world.wave = MAX_WAVES;
+    applyUpgrade(world, upgradeById('hull'));
+    applyUpgrade(world, upgradeById('drone'));
+    applyUpgrade(world, upgradeById('aegis'));
+    applyUpgrade(world, upgradeById('overcharge'));
+    startWave(world, MAX_WAVES);
+    rebuildBackdrop();
+    // Both bosses fall through the real defeat path, so the victory stats
+    // count genuine kills and their core drops.
+    for (const bossId of ['warden', 'reaper']) {
+      const boss = spawnBoss(world, bossId);
+      damageBoss(world, boss, boss.maxHp, []);
+    }
     world.score = 1870;
     world.bankedCount = 63;
     world.bestCombo = 4;
@@ -314,6 +407,12 @@ window.__salvage = {
       hull: Math.round(world.ship.hull),
       fuel: Math.round(world.ship.fuel),
       wave: world.wave,
+      sector: world.sector.name,
+      bosses: world.bosses.map((boss) => ({ name: boss.name, hp: boss.hp, maxHp: boss.maxHp, phase: boss.phase })),
+      bossesDown: world.bossesDown,
+      drone: world.drone !== null,
+      shield: world.ship.shield,
+      upgradesTaken: world.upgradesTaken.slice(),
       bankedMass: world.bankedMass,
       quota: world.quota,
       combo: world.combo,

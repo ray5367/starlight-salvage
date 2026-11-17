@@ -3,6 +3,7 @@
 // moves these entities and render.js draws them.
 
 import { makeRng } from './rng.js';
+import { sectorForWave } from './biomes.js';
 
 export const GAME_WIDTH = 1280;
 export const GAME_HEIGHT = 720;
@@ -59,19 +60,11 @@ export function difficultyById(id) {
 }
 
 export const WAVE_CONFIGS = [
-  { quota: 6, debris: 10, mines: 2, speed: 1.0, volatileChance: 0.18 },
-  { quota: 9, debris: 13, mines: 3, speed: 1.15, volatileChance: 0.22 },
-  { quota: 12, debris: 16, mines: 4, speed: 1.3, volatileChance: 0.26 },
-  { quota: 16, debris: 19, mines: 5, speed: 1.45, volatileChance: 0.3 },
-  { quota: 20, debris: 22, mines: 6, speed: 1.6, volatileChance: 0.34 },
-];
-
-export const UPGRADE_POOL = [
-  { id: 'hull', name: 'REINFORCED HULL', desc: '+25 max hull, and repair 25', icon: 'shield' },
-  { id: 'thrust', name: 'ION THRUSTERS', desc: '+20% thrust power', icon: 'flame' },
-  { id: 'tether', name: 'LONG TETHER', desc: '+30% tether range', icon: 'link' },
-  { id: 'magnet', name: 'MAGNET ARRAY', desc: '+45 magnet radius', icon: 'magnet' },
-  { id: 'fuel', name: 'FUEL TANK', desc: '+25 max fuel, and refill 25', icon: 'cell' },
+  { quota: 6, debris: 12, mines: 2, speed: 1.0, volatileChance: 0.18 },
+  { quota: 9, debris: 15, mines: 3, speed: 1.15, volatileChance: 0.22 },
+  { quota: 12, debris: 18, mines: 4, speed: 1.3, volatileChance: 0.3 },
+  { quota: 16, debris: 21, mines: 5, speed: 1.45, volatileChance: 0.32 },
+  { quota: 20, debris: 24, mines: 6, speed: 1.6, volatileChance: 0.34 },
 ];
 
 export const DEBRIS_TYPES = {
@@ -104,10 +97,25 @@ export function createWorld(seed, difficultyId = 'salvager') {
       thrusting: false,
       invuln: 0,
       docking: false,
+      // Ship systems installed by upgrades; every one starts at its base
+      // value and changes only through applyUpgrade in upgrades.js.
+      shield: 0,
+      maxShield: 0,
+      regen: 0,
+      fuelOnBank: 0,
+      scoreMult: 1,
+      volatileHold: VOLATILE_HOLD_LIMIT,
+      mineResist: 0,
+      comboWindow: COMBO_WINDOW,
     },
     debris: [],
     mines: [],
     fuelCells: [],
+    bosses: [],
+    shockwaves: [],
+    drone: null,
+    bossesDown: 0,
+    sector: sectorForWave(1),
     particles: [],
     floaters: [],
     tether: { target: null, heldTime: 0 },
@@ -178,6 +186,26 @@ export function makeDebris(world, type, speedMult) {
   };
 }
 
+export function makeDebrisAt(world, type, x, y, speedMult) {
+  const rng = world.rng;
+  const heading = rng.angle();
+  const speed = rng.range(30, 90) * speedMult;
+  const radius = type === 'core' ? rng.range(12, 15) : type === 'volatile' ? rng.range(14, 18) : rng.range(13, 20);
+  return {
+    type,
+    x: x + rng.range(-30, 30),
+    y: y + rng.range(-30, 30),
+    vx: Math.cos(heading) * speed,
+    vy: Math.sin(heading) * speed,
+    angle: rng.angle(),
+    spin: rng.range(-1.2, 1.2),
+    radius,
+    mass: DEBRIS_TYPES[type].mass,
+    value: DEBRIS_TYPES[type].value,
+    shape: makeDebrisShape(rng, radius),
+  };
+}
+
 export function makeMine(world, speedMult) {
   const rng = world.rng;
   const spot = spawnSpot(world, 250, 220);
@@ -210,8 +238,10 @@ export function makeFuelCell(world) {
 
 export function startWave(world, wave) {
   const config = WAVE_CONFIGS[wave - 1];
-  const speed = config.speed * world.difficulty.speedMult;
+  const sector = sectorForWave(wave);
+  const speed = config.speed * world.difficulty.speedMult * sector.driftMult;
   world.wave = wave;
+  world.sector = sector;
   world.quota = Math.max(1, Math.round(config.quota * world.difficulty.quotaMult));
   world.bankedMass = 0;
   world.combo = 0;
@@ -219,8 +249,12 @@ export function startWave(world, wave) {
   world.debris = [];
   world.mines = [];
   world.fuelCells = [];
+  world.bosses = [];
+  world.shockwaves = [];
   world.tether.target = null;
   world.tether.heldTime = 0;
+  world.ship.shield = world.ship.maxShield;
+  const volatileChance = Math.min(0.5, config.volatileChance + sector.volatileBonus);
   for (let i = 0; i < config.debris; i += 1) {
     let type = 'scrap';
     if (i === 0) type = 'core';
@@ -228,13 +262,13 @@ export function startWave(world, wave) {
     else {
       const roll = world.rng.next();
       if (roll < 0.1) type = 'core';
-      else if (roll < 0.1 + config.volatileChance) type = 'volatile';
+      else if (roll < 0.1 + volatileChance) type = 'volatile';
     }
     world.debris.push(makeDebris(world, type, speed));
   }
-  for (let i = 0; i < config.mines; i += 1) world.mines.push(makeMine(world, speed));
+  for (let i = 0; i < config.mines + sector.mineBonus; i += 1) world.mines.push(makeMine(world, speed));
   for (let i = 0; i < 2; i += 1) world.fuelCells.push(makeFuelCell(world));
-  setBanner(world, `WAVE ${wave}`, `BANK ${world.quota} MASS  ·  ${world.difficulty.name}`);
+  setBanner(world, `WAVE ${wave} — ${sector.name}`, `BANK ${world.quota} MASS  ·  ${world.difficulty.name}`);
 }
 
 export function seedAmbientField(world) {
@@ -243,29 +277,6 @@ export function seedAmbientField(world) {
     world.debris.push(makeDebris(world, type, 0.7));
   }
   for (let i = 0; i < 3; i += 1) world.mines.push(makeMine(world, 0.7));
-}
-
-export function rollUpgrades(rng) {
-  return rng.shuffle(UPGRADE_POOL).slice(0, 3);
-}
-
-export function applyUpgrade(world, upgrade) {
-  const ship = world.ship;
-  if (upgrade.id === 'hull') {
-    ship.maxHull += 25;
-    ship.hull = Math.min(ship.maxHull, ship.hull + 25);
-  } else if (upgrade.id === 'thrust') {
-    ship.thrust *= 1.2;
-  } else if (upgrade.id === 'tether') {
-    ship.tetherRange *= 1.3;
-  } else if (upgrade.id === 'magnet') {
-    ship.magnetRadius += 45;
-  } else if (upgrade.id === 'fuel') {
-    ship.maxFuel += 25;
-    ship.fuel = Math.min(ship.maxFuel, ship.fuel + 25);
-  }
-  world.upgradesTaken.push(upgrade.id);
-  return upgrade;
 }
 
 export function addParticles(world, x, y, { count, color, speed, life, size }) {
