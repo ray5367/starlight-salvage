@@ -10,6 +10,8 @@ import {
   RING_RADIUS,
   DOCK_RADIUS,
   VOLATILE_HOLD_LIMIT,
+  COMBO_WINDOW,
+  COMBO_CAP,
   DEBRIS_TYPES,
   WAVE_CONFIGS,
   addParticles,
@@ -78,14 +80,22 @@ function explodeDebris(world, debris, events) {
 function bankDebris(world, debris, events) {
   const index = world.debris.indexOf(debris);
   if (index !== -1) world.debris.splice(index, 1);
-  world.score += debris.value;
+  // Banking again before the combo window runs out raises the multiplier, up
+  // to the cap; a slow run banks at x1. Wreckdiver doubles every score.
+  world.combo = world.comboTimer > 0 ? world.combo + 1 : 1;
+  world.comboTimer = COMBO_WINDOW;
+  world.bestCombo = Math.max(world.bestCombo, world.combo);
+  const multiplier = Math.min(world.combo, COMBO_CAP);
+  const points = debris.value * multiplier * world.difficulty.scoreMult;
+  world.score += points;
   world.bankedMass += debris.mass;
   world.bankedCount += 1;
   addParticles(world, debris.x, debris.y, { count: 22, color: DEBRIS_TYPES[debris.type].glow, speed: 170, life: 0.6, size: 2.5 });
-  addFloater(world, STATION_X, STATION_Y - RING_RADIUS - 14, `+${debris.value} ${DEBRIS_TYPES[debris.type].label}`, DEBRIS_TYPES[debris.type].color);
-  events.push({ type: 'bank', value: debris.value, mass: debris.mass });
+  const label = multiplier > 1 ? `+${points} ${DEBRIS_TYPES[debris.type].label} x${multiplier}` : `+${points} ${DEBRIS_TYPES[debris.type].label}`;
+  addFloater(world, STATION_X, STATION_Y - RING_RADIUS - 14, label, DEBRIS_TYPES[debris.type].color);
+  events.push({ type: 'bank', value: points, mass: debris.mass, combo: world.combo, multiplier });
   if (world.bankedMass >= world.quota) {
-    world.score += 100 * world.wave;
+    world.score += 100 * world.wave * world.difficulty.scoreMult;
     events.push({ type: 'wave_clear' });
   }
 }
@@ -274,7 +284,7 @@ function updateCollisions(world, events) {
       addParticles(world, mine.x, mine.y, { count: 30, color: '#f87171', speed: 240, life: 0.6, size: 3 });
       world.shake = Math.min(1, world.shake + 0.5);
       events.push({ type: 'mine_hit', x: mine.x, y: mine.y });
-      damageShip(world, 25, events);
+      damageShip(world, world.difficulty.mineDamage, events);
     }
   }
   for (const cell of world.fuelCells.slice()) {
@@ -349,6 +359,17 @@ function updateEffects(world, dt) {
 export function stepWorld(world, input, dt) {
   const events = [];
   world.runTime += dt;
+  if (world.comboTimer > 0) {
+    world.comboTimer -= dt;
+    if (world.comboTimer <= 0) {
+      world.comboTimer = 0;
+      world.combo = 0;
+    }
+  }
+  if (world.banner) {
+    world.banner.time -= dt;
+    if (world.banner.time <= 0) world.banner = null;
+  }
   updateFlare(world, dt, events);
   updateShip(world, input, dt);
   updateTether(world, input, dt, events);

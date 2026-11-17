@@ -16,6 +16,9 @@ export class Input {
     this.mouse = { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 2, down: false, pressed: false };
     this.clicks = [];
     this.anyGesture = false;
+    // Screenshot staging only: ?shot=play holds the tether so the staged
+    // mid-drag state renders as the player sees it. Never set during play.
+    this.overrideHeld = false;
   }
 
   attach() {
@@ -71,7 +74,7 @@ export class Input {
   }
 
   tetherHeld() {
-    return this.isDown('Space') || this.mouse.down;
+    return this.overrideHeld || this.isDown('Space') || this.mouse.down;
   }
 
   consumeClick() {

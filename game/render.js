@@ -11,7 +11,10 @@ import {
   RING_RADIUS,
   DOCK_RADIUS,
   VOLATILE_HOLD_LIMIT,
+  COMBO_WINDOW,
+  COMBO_CAP,
   DEBRIS_TYPES,
+  DIFFICULTIES,
   MAX_WAVES,
 } from './world.js';
 import { makeRng } from './rng.js';
@@ -20,6 +23,16 @@ const FONT = "'Trebuchet MS', 'Segoe UI', system-ui, sans-serif";
 
 export const TITLE_START_BUTTON = { x: 490, y: 512, w: 300, h: 62 };
 export const END_BUTTON = { x: 490, y: 552, w: 300, h: 60 };
+export const PAUSE_RESUME_BUTTON = { x: 490, y: 414, w: 300, h: 54 };
+export const PAUSE_RESTART_BUTTON = { x: 490, y: 480, w: 300, h: 54 };
+
+export function difficultyButtonRects() {
+  const width = 280;
+  const gap = 30;
+  const total = width * 3 + gap * 2;
+  const startX = (GAME_WIDTH - total) / 2;
+  return [0, 1, 2].map((i) => ({ x: startX + i * (width + gap), y: 424, w: width, h: 64 }));
+}
 
 export function upgradeCardRects() {
   const width = 280;
@@ -435,7 +448,19 @@ function drawHud(ctx, world, ui) {
   ctx.fillText(`SCORE ${world.score.toLocaleString('en-US')}`, 24, 38);
   ctx.font = font(600, 16);
   ctx.fillStyle = '#7dd3fc';
-  ctx.fillText(`WAVE ${world.wave} / ${MAX_WAVES}`, 24, 62);
+  ctx.fillText(`WAVE ${world.wave} / ${MAX_WAVES}  ·  ${world.difficulty.name}`, 24, 62);
+  if (ui.bestScore > 0) {
+    ctx.font = font(400, 13);
+    ctx.fillStyle = 'rgba(224, 242, 254, 0.6)';
+    ctx.fillText(`BEST ${ui.bestScore.toLocaleString('en-US')}`, 24, 82);
+  }
+  if (world.combo >= 2) {
+    const multiplier = Math.min(world.combo, COMBO_CAP);
+    ctx.font = font(700, 20);
+    ctx.fillStyle = '#fbbf24';
+    ctx.fillText(`COMBO x${multiplier}`, 24, 110);
+    drawBar(ctx, 24, 116, 110, 7, world.comboTimer / COMBO_WINDOW, '#fbbf24', 'rgba(148, 163, 184, 0.25)');
+  }
   ctx.textAlign = 'center';
   ctx.font = font(600, 14);
   ctx.fillStyle = '#e0f2fe';
@@ -500,6 +525,27 @@ function drawHud(ctx, world, ui) {
   ctx.restore();
 }
 
+function drawBanner(ctx, world) {
+  const banner = world.banner;
+  if (!banner) return;
+  const fadeIn = Math.min(1, (banner.ttl - banner.time) / 0.25);
+  const fadeOut = Math.min(1, banner.time / 0.5);
+  const alpha = Math.min(fadeIn, fadeOut);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(34, 211, 238, 0.8)';
+  ctx.shadowBlur = 22;
+  ctx.fillStyle = '#ecfeff';
+  ctx.font = font(700, 54);
+  ctx.fillText(banner.text, GAME_WIDTH / 2, 300);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#7dd3fc';
+  ctx.font = font(600, 20);
+  ctx.fillText(banner.sub, GAME_WIDTH / 2, 336);
+  ctx.restore();
+}
+
 function drawButton(ctx, rect, label, hovered, accent) {
   ctx.save();
   ctx.fillStyle = hovered ? 'rgba(34, 211, 238, 0.28)' : 'rgba(14, 116, 144, 0.45)';
@@ -531,6 +577,15 @@ function drawTitle(ctx, world, ui) {
   ctx.fillStyle = '#7dd3fc';
   ctx.font = font(600, 21);
   ctx.fillText('Pilot a salvage tug through the wreck fields. Tether debris. Bank mass. Survive.', GAME_WIDTH / 2, 208);
+  if (ui.bestScore > 0) {
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = font(700, 17);
+    ctx.fillText(`BEST SCORE  ${ui.bestScore.toLocaleString('en-US')}`, GAME_WIDTH / 2, 240);
+  } else {
+    ctx.fillStyle = 'rgba(224, 242, 254, 0.55)';
+    ctx.font = font(400, 15);
+    ctx.fillText('No salvage banked yet — fly your first run.', GAME_WIDTH / 2, 240);
+  }
   const lines = [
     'Tether debris with Space or the mouse, then drag it into the recycler ring and release to bank it.',
     'Bank the wave quota to advance — clear all 5 waves to win the field.',
@@ -540,6 +595,27 @@ function drawTitle(ctx, world, ui) {
   ctx.font = font(400, 17);
   ctx.fillStyle = 'rgba(224, 242, 254, 0.92)';
   lines.forEach((line, i) => ctx.fillText(line, GAME_WIDTH / 2, 268 + i * 30));
+  ctx.font = font(700, 14);
+  ctx.fillStyle = 'rgba(224, 242, 254, 0.7)';
+  ctx.fillText('CHOOSE YOUR FIELD  ·  1 / 2 / 3', GAME_WIDTH / 2, 410);
+  const difficultyRects = difficultyButtonRects();
+  DIFFICULTIES.forEach((difficulty, i) => {
+    const rect = difficultyRects[i];
+    const selected = ui.selectedDifficulty === difficulty.id;
+    const hovered = inside(ui.mouse, rect);
+    ctx.fillStyle = selected ? 'rgba(34, 211, 238, 0.26)' : hovered ? 'rgba(34, 211, 238, 0.12)' : 'rgba(15, 23, 42, 0.8)';
+    ctx.strokeStyle = selected ? '#a5f3fc' : 'rgba(103, 232, 249, 0.55)';
+    ctx.lineWidth = selected ? 3 : 2;
+    roundRectPath(ctx, rect.x, rect.y, rect.w, rect.h, 10);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = selected ? '#ecfeff' : '#bae6fd';
+    ctx.font = font(700, 18);
+    ctx.fillText(difficulty.name, rect.x + rect.w / 2, rect.y + 27);
+    ctx.fillStyle = 'rgba(224, 242, 254, 0.7)';
+    ctx.font = font(400, 13);
+    ctx.fillText(difficulty.desc, rect.x + rect.w / 2, rect.y + 48);
+  });
   drawButton(ctx, TITLE_START_BUTTON, 'START SALVAGING', inside(ui.mouse, TITLE_START_BUTTON), '#22d3ee');
   ctx.font = font(400, 15);
   ctx.fillStyle = 'rgba(224, 242, 254, 0.65)';
@@ -675,13 +751,15 @@ function drawEndScreen(ctx, world, ui, victory) {
   ctx.fillText(victory ? 'Every wave banked. The wreck field is yours.' : 'The tug broke apart in the wreck field.', GAME_WIDTH / 2, 234);
   const stats = [
     ['FINAL SCORE', world.score.toLocaleString('en-US')],
+    ['BEST SCORE', ui.bestScore.toLocaleString('en-US')],
     ['TIME', formatTime(world.runTime)],
     ['DEBRIS BANKED', String(world.bankedCount)],
+    ['BEST COMBO', world.bestCombo >= 2 ? `x${Math.min(world.bestCombo, COMBO_CAP)}` : '—'],
     victory ? ['WAVES CLEARED', `${MAX_WAVES} / ${MAX_WAVES}`] : ['WAVE REACHED', `${world.wave} / ${MAX_WAVES}`],
   ];
   ctx.font = font(400, 19);
   stats.forEach(([label, value], i) => {
-    const y = 300 + i * 36;
+    const y = 288 + i * 34;
     ctx.fillStyle = 'rgba(224, 242, 254, 0.7)';
     ctx.textAlign = 'right';
     ctx.fillText(label, GAME_WIDTH / 2 - 24, y);
@@ -691,6 +769,12 @@ function drawEndScreen(ctx, world, ui, victory) {
     ctx.fillText(value, GAME_WIDTH / 2 + 24, y);
     ctx.font = font(400, 19);
   });
+  if (ui.newBest) {
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = font(700, 22);
+    ctx.textAlign = 'center';
+    ctx.fillText('★ NEW BEST SCORE ★', GAME_WIDTH / 2, 508);
+  }
   drawButton(ctx, END_BUTTON, victory ? 'SALVAGE AGAIN' : 'TRY AGAIN', inside(ui.mouse, END_BUTTON), victory ? '#22d3ee' : '#f87171');
   ctx.font = font(400, 15);
   ctx.fillStyle = 'rgba(224, 242, 254, 0.65)';
@@ -699,7 +783,7 @@ function drawEndScreen(ctx, world, ui, victory) {
   ctx.restore();
 }
 
-function drawPauseOverlay(ctx) {
+function drawPauseOverlay(ctx, ui) {
   ctx.fillStyle = 'rgba(5, 5, 20, 0.6)';
   ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
   ctx.save();
@@ -711,6 +795,8 @@ function drawPauseOverlay(ctx) {
   ctx.fillStyle = 'rgba(224, 242, 254, 0.8)';
   ctx.fillText('P or Esc to resume · R to restart', GAME_WIDTH / 2, 384);
   ctx.restore();
+  drawButton(ctx, PAUSE_RESUME_BUTTON, 'RESUME', inside(ui.mouse, PAUSE_RESUME_BUTTON), '#22d3ee');
+  drawButton(ctx, PAUSE_RESTART_BUTTON, 'RESTART RUN', inside(ui.mouse, PAUSE_RESTART_BUTTON), '#fbbf24');
 }
 
 export function render(ctx, world, ui) {
@@ -737,9 +823,10 @@ export function render(ctx, world, ui) {
     ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
   }
   if (ui.screen === 'playing') drawHud(ctx, world, ui);
+  if (ui.screen === 'playing' && !ui.paused) drawBanner(ctx, world);
   if (ui.screen === 'title') drawTitle(ctx, world, ui);
   else if (ui.screen === 'upgrade') drawUpgradeScreen(ctx, world, ui);
   else if (ui.screen === 'victory') drawEndScreen(ctx, world, ui, true);
   else if (ui.screen === 'gameover') drawEndScreen(ctx, world, ui, false);
-  if (ui.screen === 'playing' && ui.paused) drawPauseOverlay(ctx);
+  if (ui.screen === 'playing' && ui.paused) drawPauseOverlay(ctx, ui);
 }

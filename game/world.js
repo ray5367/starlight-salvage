@@ -12,6 +12,51 @@ export const RING_RADIUS = 108;
 export const DOCK_RADIUS = 175;
 export const VOLATILE_HOLD_LIMIT = 3;
 export const MAX_WAVES = 5;
+export const COMBO_WINDOW = 6;
+export const COMBO_CAP = 5;
+
+// Difficulties, picked on the title screen. Each one changes the hull, the
+// fuel tank, the mass quotas, the mine damage and the drift speed, and
+// Wreckdiver doubles every score, so the choice is a real trade, not a label.
+export const DIFFICULTIES = [
+  {
+    id: 'drifter',
+    name: 'DRIFTER',
+    desc: 'Relaxed: sturdy hull, smaller quotas',
+    hull: 130,
+    fuel: 120,
+    quotaMult: 0.8,
+    mineDamage: 15,
+    speedMult: 0.9,
+    scoreMult: 1,
+  },
+  {
+    id: 'salvager',
+    name: 'SALVAGER',
+    desc: 'The standard salvage run',
+    hull: 100,
+    fuel: 100,
+    quotaMult: 1,
+    mineDamage: 25,
+    speedMult: 1,
+    scoreMult: 1,
+  },
+  {
+    id: 'wreckdiver',
+    name: 'WRECKDIVER',
+    desc: 'Brutal field, double score',
+    hull: 75,
+    fuel: 90,
+    quotaMult: 1.25,
+    mineDamage: 35,
+    speedMult: 1.15,
+    scoreMult: 2,
+  },
+];
+
+export function difficultyById(id) {
+  return DIFFICULTIES.find((difficulty) => difficulty.id === id) ?? DIFFICULTIES[1];
+}
 
 export const WAVE_CONFIGS = [
   { quota: 6, debris: 10, mines: 2, speed: 1.0, volatileChance: 0.18 },
@@ -35,11 +80,13 @@ export const DEBRIS_TYPES = {
   core: { value: 50, mass: 1, color: '#e879f9', glow: '#c026d3', label: 'DATA CORE' },
 };
 
-export function createWorld(seed) {
+export function createWorld(seed, difficultyId = 'salvager') {
   const rng = makeRng(seed);
+  const difficulty = difficultyById(difficultyId);
   return {
     seed,
     rng,
+    difficulty,
     ship: {
       x: 640,
       y: 580,
@@ -47,10 +94,10 @@ export function createWorld(seed) {
       vy: 0,
       angle: -Math.PI / 2,
       radius: 15,
-      hull: 100,
-      maxHull: 100,
-      fuel: 100,
-      maxFuel: 100,
+      hull: difficulty.hull,
+      maxHull: difficulty.hull,
+      fuel: difficulty.fuel,
+      maxFuel: difficulty.fuel,
       thrust: 300,
       tetherRange: 260,
       magnetRadius: 90,
@@ -70,11 +117,21 @@ export function createWorld(seed) {
     quota: WAVE_CONFIGS[0].quota,
     bankedCount: 0,
     runTime: 0,
+    combo: 0,
+    comboTimer: 0,
+    bestCombo: 0,
+    banner: null,
     flare: { phase: 'idle', timer: rng.range(16, 24), time: 0 },
     shake: 0,
     flash: 0,
     upgradesTaken: [],
   };
+}
+
+// The centered banner shown when a wave starts: the wave number and its
+// quota, fading out over its lifetime. Only one banner shows at a time.
+export function setBanner(world, text, sub, ttl = 2.6) {
+  world.banner = { text, sub, time: ttl, ttl };
 }
 
 function spawnSpot(world, minStation, minShip) {
@@ -153,9 +210,12 @@ export function makeFuelCell(world) {
 
 export function startWave(world, wave) {
   const config = WAVE_CONFIGS[wave - 1];
+  const speed = config.speed * world.difficulty.speedMult;
   world.wave = wave;
-  world.quota = config.quota;
+  world.quota = Math.max(1, Math.round(config.quota * world.difficulty.quotaMult));
   world.bankedMass = 0;
+  world.combo = 0;
+  world.comboTimer = 0;
   world.debris = [];
   world.mines = [];
   world.fuelCells = [];
@@ -170,10 +230,11 @@ export function startWave(world, wave) {
       if (roll < 0.1) type = 'core';
       else if (roll < 0.1 + config.volatileChance) type = 'volatile';
     }
-    world.debris.push(makeDebris(world, type, config.speed));
+    world.debris.push(makeDebris(world, type, speed));
   }
-  for (let i = 0; i < config.mines; i += 1) world.mines.push(makeMine(world, config.speed));
+  for (let i = 0; i < config.mines; i += 1) world.mines.push(makeMine(world, speed));
   for (let i = 0; i < 2; i += 1) world.fuelCells.push(makeFuelCell(world));
+  setBanner(world, `WAVE ${wave}`, `BANK ${world.quota} MASS  ·  ${world.difficulty.name}`);
 }
 
 export function seedAmbientField(world) {

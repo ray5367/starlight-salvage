@@ -4,7 +4,9 @@
 // directory and writes dossier.json there with the vendored make.fun library,
 // using the scorer's own caps so a run fails here exactly where the scorer
 // would refuse the entry. Outside the grader, MAKEFUN_OUTPUT_DIR stands in
-// for /output, and both runs must write the same bytes.
+// for /output, and both runs must write the same bytes. The output shares the
+// platform's own cap (1,000 entries, 64 MiB) between game/, screenshots/ and
+// dossier.json, so the caps below leave the other two room.
 
 import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

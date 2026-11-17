@@ -89,6 +89,14 @@ export class AudioEngine {
     this.tone({ freq: 1318, dur: 0.2, gain: 0.16, delay: 0.08 });
   }
 
+  // The bank chime climbs a semitone per combo step, so a streak sounds like
+  // a streak; at x1 it is the plain chime.
+  chimeCombo(combo) {
+    const lift = Math.pow(2, Math.min(combo - 1, 8) / 12);
+    this.tone({ freq: 880 * lift, dur: 0.12, gain: 0.18 });
+    this.tone({ freq: 1318 * lift, dur: 0.2, gain: 0.16, delay: 0.08 });
+  }
+
   explosion() {
     this.noise({ dur: 0.5, gain: 0.4, freq: 320, quality: 0.6 });
     this.tone({ freq: 130, freqEnd: 38, dur: 0.45, gain: 0.35 });
